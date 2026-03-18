@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brio-pink: #FF5F7E;
+  --color-brio-cream: #FDFCF6;
+  --color-brio-dark: #4A154B;
+  --color-brio-card: #F7F3E9;
+  --color-brio-orange: #FFB74D;
+  --color-brio-green: #A5D6A7;
+  --color-brio-blue: #64B5F6;
+  
+  --font-serif: "Playfair Display", serif;
+  --font-sans: "Inter", sans-serif;
+
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  --animate-spin-slow: spin-slow 12s linear infinite;
+}
+
+@layer base {
+  body {
+    @apply bg-brio-cream text-brio-dark font-sans;
+  }
+}
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@700;900&display=swap');
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.emotion-card-shadow {
+  box-shadow: 0 10px 30px -5px rgba(74, 21, 75, 0.1);
+}
+
+.active-emotion-shadow {
+  box-shadow: 0 20px 50px -10px rgba(74, 21, 75, 0.2);
+}
