@@ -1,4 +1,4 @@
-import React from 'react';
+import * as React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Calendar, 
@@ -18,8 +18,74 @@ import {
   Camera,
   Image as ImageIcon,
   Search,
-  Share2
+  Share2,
+  LogOut
 } from 'lucide-react';
+import { 
+  auth, 
+  db, 
+  loginWithGoogle, 
+  logout, 
+  handleFirestoreError, 
+  OperationType 
+} from './firebase';
+import { 
+  onAuthStateChanged, 
+  User as FirebaseUser 
+} from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc,
+  onSnapshot, 
+  query, 
+  orderBy, 
+  Timestamp, 
+  deleteDoc,
+  serverTimestamp
+} from 'firebase/firestore';
+
+// --- Error Boundary ---
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends React.Component<any, any> {
+  state: any = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error): any {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: any) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="h-screen flex flex-col items-center justify-center bg-[#FDF6E9] p-8 text-center">
+          <h2 className="text-2xl font-serif text-brio-dark mb-4">¡Ups! Algo salió mal.</h2>
+          <p className="text-brio-dark/60 mb-8">Estamos trabajando para solucionarlo.</p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-8 py-3 bg-brio-dark text-white rounded-full font-bold"
+          >
+            Reintentar
+          </button>
+        </div>
+      );
+    }
+
+    return (this as any).props.children;
+  }
+}
 
 // --- Types ---
 type Screen = 
@@ -424,24 +490,150 @@ const CalendarOverlay = ({ isOpen, onClose, entries }: { isOpen: boolean, onClos
   </AnimatePresence>
 );
 
-export default function App() {
+export default function AppWrapper() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  );
+}
+
+function App() {
   const [screen, setScreen] = React.useState<Screen>('splash');
+  const [user, setUser] = React.useState<FirebaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = React.useState(false);
   const [userName, setUserName] = React.useState('');
   const [age, setAge] = React.useState('');
+  const [entries, setEntries] = React.useState<Entry[]>([]);
   const [selectedEmotion, setSelectedEmotion] = React.useState<Emotion>(EMOTIONS[0]);
   const [isCalendarOpen, setIsCalendarOpen] = React.useState(false);
-  const [entries, setEntries] = React.useState<Entry[]>([]);
   const [editingEntry, setEditingEntry] = React.useState<Entry | null>(null);
   const [note, setNote] = React.useState('');
   const [frequency, setFrequency] = React.useState('De vez en cuando');
   const [notifications, setNotifications] = React.useState(true);
 
+  // Auth Listener
+  React.useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Initial Splash Timer
   React.useEffect(() => {
     if (screen === 'splash') {
-      const timer = setTimeout(() => setScreen('welcome'), 2000);
+      const timer = setTimeout(() => {
+        if (isAuthReady) {
+          setScreen(user ? 'home' : 'welcome');
+        }
+      }, 2000);
       return () => clearTimeout(timer);
     }
-  }, [screen]);
+  }, [screen, isAuthReady, user]);
+
+  // Firestore Sync
+  React.useEffect(() => {
+    if (!user || !isAuthReady) {
+      setEntries([]);
+      return;
+    }
+
+    const entriesRef = collection(db, 'users', user.uid, 'entries');
+    const q = query(entriesRef, orderBy('timestamp', 'asc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const syncedEntries: Entry[] = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          ...data,
+          id: doc.id,
+          timestamp: data.timestamp instanceof Timestamp ? data.timestamp.toDate() : new Date(data.timestamp)
+        } as Entry;
+      });
+      setEntries(syncedEntries);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `users/${user.uid}/entries`);
+    });
+
+    return () => unsubscribe();
+  }, [user, isAuthReady]);
+
+  const handleSaveEntry = async () => {
+    if (!user) return;
+
+    const entryId = editingEntry ? editingEntry.id : crypto.randomUUID();
+    const entryData = {
+      id: entryId,
+      userId: user.uid,
+      emotionId: selectedEmotion.id,
+      timestamp: editingEntry ? editingEntry.timestamp : new Date(),
+      note: note,
+    };
+
+    try {
+      const entryRef = doc(db, 'users', user.uid, 'entries', entryId);
+      await setDoc(entryRef, entryData);
+      setNote('');
+      setEditingEntry(null);
+      setScreen('home');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/entries/${entryId}`);
+    }
+  };
+
+  const handleDeleteEntry = async (id: string) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'users', user.uid, 'entries', id));
+      setScreen('home');
+      setEditingEntry(null);
+      setNote('');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/entries/${id}`);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      const firebaseUser = await loginWithGoogle();
+      // Save user profile to Firestore
+      const userRef = doc(db, 'users', firebaseUser.uid);
+      const userSnap = await getDoc(userRef);
+      
+      if (!userSnap.exists()) {
+        await setDoc(userRef, {
+          uid: firebaseUser.uid,
+          displayName: firebaseUser.displayName,
+          email: firebaseUser.email,
+          photoURL: firebaseUser.photoURL,
+          createdAt: serverTimestamp()
+        });
+      }
+      setScreen('home');
+    } catch (error) {
+      console.error("Login failed", error);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      setScreen('welcome');
+    } catch (error) {
+      console.error("Logout failed", error);
+    }
+  };
+
+  if (!isAuthReady && screen === 'splash') {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-brio-cream">
+        <div className="text-brio-dark text-8xl font-serif mb-4 animate-pulse">✿</div>
+        <h1 className="text-brio-dark text-6xl font-serif">Brío</h1>
+      </div>
+    );
+  }
 
   const renderScreen = () => {
     switch (screen) {
@@ -503,8 +695,9 @@ export default function App() {
             <h2 className="text-2xl text-brio-dark font-serif text-center mb-8">Estás a un paso de empezar a sentir</h2>
             
             <div className="w-full bg-white/50 p-8 rounded-3xl flex flex-col gap-4">
-              <button onClick={() => setScreen('login-name')} className="w-full py-4 bg-white rounded-2xl border border-brio-dark/10 flex items-center justify-center gap-3 shadow-sm">
-                <span className="font-bold text-xl">G</span> Iniciar sesión con Google
+              <button onClick={handleGoogleLogin} className="w-full py-4 bg-white rounded-2xl border border-brio-dark/10 flex items-center justify-center gap-3 shadow-sm hover:bg-gray-50 transition-colors">
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6" />
+                <span className="font-bold text-lg text-brio-dark">Iniciar sesión con Google</span>
               </button>
               <button onClick={() => setScreen('login-name')} className="w-full py-4 bg-white rounded-2xl border border-brio-dark/10 flex items-center justify-center gap-3 shadow-sm">
                 <span className="text-2xl"></span> Iniciar sesión con Apple
@@ -836,22 +1029,7 @@ export default function App() {
                 </div>
 
                 <button 
-                  onClick={() => {
-                    if (editingEntry) {
-                      setEntries(prev => prev.map(e => e.id === editingEntry.id ? { ...e, note } : e));
-                    } else {
-                      const newEntry: Entry = {
-                        id: Math.random().toString(36).substr(2, 9),
-                        emotionId: selectedEmotion.id,
-                        timestamp: new Date(),
-                        note
-                      };
-                      setEntries(prev => [...prev, newEntry]);
-                    }
-                    setScreen('home');
-                    setEditingEntry(null);
-                    setNote('');
-                  }}
+                  onClick={handleSaveEntry}
                   className="w-full py-4 bg-brio-dark text-white rounded-full font-medium shadow-lg hover:bg-brio-dark/90 transition-colors mt-4"
                 >
                   {editingEntry ? 'Guardar cambios' : 'Registrar emoción'}
@@ -860,12 +1038,7 @@ export default function App() {
               
               {editingEntry && (
                 <button 
-                  onClick={() => {
-                    setEntries(prev => prev.filter(e => e.id !== editingEntry.id));
-                    setScreen('home');
-                    setEditingEntry(null);
-                    setNote('');
-                  }}
+                  onClick={() => handleDeleteEntry(editingEntry.id)}
                   className="mt-6 text-red-500 font-medium text-sm text-center"
                 >
                   Eliminar registro
@@ -1122,6 +1295,22 @@ export default function App() {
             <Header title="Ajustes" showBack onBack={() => setScreen('home')} />
             
             <div className="flex flex-col gap-6 pb-32">
+              <div className="bg-white p-6 rounded-[32px] border border-brio-dark/5 shadow-sm flex items-center gap-4 mb-4">
+                <div className="w-16 h-16 bg-brio-pink rounded-full border-2 border-brio-dark overflow-hidden flex items-center justify-center">
+                  {user?.photoURL ? (
+                    <img src={user.photoURL} alt={user.displayName || ''} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-2xl font-bold text-brio-dark">
+                      {user?.displayName?.[0] || user?.email?.[0] || 'U'}
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <h3 className="font-bold text-brio-dark text-lg">{user?.displayName || 'Usuario'}</h3>
+                  <p className="text-sm text-brio-dark/60">{user?.email}</p>
+                </div>
+              </div>
+
               <div className="flex justify-between items-center px-2">
                 <div className="flex items-center gap-3">
                   <div className="w-6 h-6 flex items-center justify-center">🌐</div>
@@ -1150,8 +1339,15 @@ export default function App() {
               <SettingsGroup>
                 <SettingsItem label="Sobre esta app" />
                 <SettingsItem label="Ayuda y FAQ" />
-                <SettingsItem label="Contacto" />
               </SettingsGroup>
+
+              <button 
+                onClick={handleLogout}
+                className="w-full py-5 bg-red-50 text-red-600 rounded-3xl border-2 border-red-100 font-bold flex items-center justify-center gap-2 mt-4"
+              >
+                <LogOut size={20} />
+                Cerrar sesión
+              </button>
             </div>
             
             <BottomNav active="home" onChange={setScreen} />
